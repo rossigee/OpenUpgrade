@@ -8,8 +8,6 @@ _deleted_xml_records = [
     "mail.ir_rule_mail_channel_member_group_user",
     "mail.mail_channel_admin",
     "mail.mail_channel_rule",
-    "mail.channel_all_employees",
-    "mail.channel_member_general_channel_for_admin",
 ]
 
 
@@ -95,15 +93,20 @@ def _fill_mail_message_outgoing(env):
     openupgrade.logged_query(
         env.cr,
         f"""
+        WITH partners AS (
+            SELECT rp.id FROM res_partner rp
+            JOIN res_users ru ON ru.partner_id = rp.id
+            JOIN res_groups_users_rel rel ON rel.uid = ru.id AND rel.gid = {group.id}
+        )
         UPDATE mail_message mm
         SET message_type = 'email_outgoing'
-        FROM mail_mail mail, res_partner rp
-        JOIN res_users ru ON ru.partner_id = rp.id
-        JOIN res_groups_users_rel rel ON rel.uid = ru.id
-            AND rel.gid = {group.id}
         WHERE mm.message_type = 'email'
         AND mm.message_id like '%-openerp-' || mm.res_id || '-' || mm.model || '@%'
-        AND (mm.author_id = rp.id OR mail.mail_message_id = mm.id)
+        AND (
+            EXISTS (SELECT * FROM partners rp WHERE rp.id = mm.author_id)
+            OR
+            EXISTS (SELECT * FROM mail_mail mail WHERE mail.mail_message_id = mm.id)
+        )
         """,
     )
 
@@ -148,6 +151,24 @@ def _mail_activity_plan_template(env):
     )
 
 
+def _handle_mail_template_multi_attachment(env):
+    """OCA module mail_template_multi_attachment got its functionality implemented in
+    core odoo.
+    """
+    if openupgrade.table_exists(env.cr, "mail_template_report"):
+        openupgrade.logged_query(
+            env.cr,
+            """
+            INSERT INTO mail_template_ir_actions_report_rel
+                (mail_template_id, ir_actions_report_id)
+            SELECT mtr.mail_template_id,
+                mtr.report_template_id
+            FROM mail_template_report mtr
+            ON CONFLICT DO NOTHING;
+            """,
+        )
+
+
 @openupgrade.migrate()
 def migrate(env, version):
     openupgrade.load_data(env, "mail", "17.0.1.15/noupdate_changes.xml")
@@ -161,3 +182,4 @@ def migrate(env, version):
     _mail_template_convert_report_template_m2o_to_m2m(env)
     _fill_mail_message_outgoing(env)
     _mail_activity_plan_template(env)
+    _handle_mail_template_multi_attachment(env)

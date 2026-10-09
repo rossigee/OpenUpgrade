@@ -3,6 +3,8 @@
 
 from openupgradelib import openupgrade
 
+from odoo import models
+
 from odoo.addons.base.models.ir_property import TYPE2FIELD as ir_property_TYPE2FIELD
 
 _deleted_xml_records = [
@@ -115,6 +117,7 @@ def _am_update_invoice_pdf_report_file(env):
             res_id = am.id
         FROM account_move am
         WHERE am.message_main_attachment_id = ia.id
+        AND am.move_type IN ('out_invoice', 'out_refund')
         """,
     )
 
@@ -387,7 +390,6 @@ def _account_tax_group_migration(env):
         SELECT tax_group_id, array_agg(DISTINCT(company_id))
             FROM account_tax
         GROUP BY tax_group_id
-        HAVING COUNT(DISTINCT company_id) > 1
         """
     )
 
@@ -401,8 +403,13 @@ def _account_tax_group_migration(env):
             limit=1,
         )
         tax_group_name = imd.name
-        imd.write({"name": f"{first_company_id}_{imd.name}"})
-
+        imd.write(
+            {
+                "name": f"{first_company_id}_{imd.name}",
+                "noupdate": True,
+                "module": "account",
+            }
+        )
         for company_id in company_ids:
             if company_id == first_company_id:
                 continue
@@ -418,8 +425,13 @@ def _account_tax_group_migration(env):
             )
 
             if tax_group_name:
-                new_imd = imd.copy({"res_id": new_tax_group.id})
-                new_imd.write({"name": f"{company_id}_{tax_group_name}"})
+                models.BaseModel.copy(
+                    imd,
+                    {
+                        "res_id": new_tax_group.id,
+                        "name": f"{company_id}_{tax_group_name}",
+                    },
+                )
 
             openupgrade.logged_query(
                 env.cr,
@@ -481,9 +493,8 @@ def _force_install_account_payment_term_module_module(env):
             env.cr,
             """
             UPDATE account_payment_term_line
-            SET
-            nb_days = nb_days - days_after,
-            days_next_month = days_after
+            SET nb_days = nb_days - days_after,
+                days_next_month = days_after
             WHERE delay_type = 'days_end_of_month_on_the'
             """,
         )
@@ -498,7 +509,7 @@ def _map_chart_template_id_to_chart_template(
     `l10n_` prefix removed (usually the country's iso code)
     """
     env.cr.execute(
-        f"""SELECT m.id, CONCAT(imd.module, '.', imd.name)
+        f"""SELECT m.{coa_m2o}, CONCAT(imd.module, '.', imd.name)
             FROM {model_table} m
                 JOIN ir_model_data imd
                     ON imd.model='account.chart.template'
@@ -516,6 +527,36 @@ def _map_chart_template_id_to_chart_template(
         chart_id2name,
         table=model_table,
     )
+
+
+def _rename_coa_elements_xmlids(env):
+    """On v17, when you load a CoA into a company, the CoA elements are still given an
+    XML-ID with the company ID + `_` + the original template XML-ID, but now, instead of
+    putting the module containing the template, all of them are put with the module
+    `account`. Reference:
+
+    https://github.com/odoo/odoo/blob/b9abe46c1492b09e369434e76ec8196c6b02dd19/
+    addons/account/models/chart_template.py#L608
+
+    Thus, we need to rename the module for all the existing CoA elements XML-IDs with
+    this pattern.
+    """
+    for company in env["res.company"].search([]):
+        openupgrade.logged_query(
+            env.cr,
+            f"""
+            UPDATE ir_model_data
+            SET module='account'
+            WHERE module <> 'account'
+            AND model IN (
+                'account.account',
+                'account.fiscal.position',
+                'account.group',
+                'account.tax'
+            )
+            AND name LIKE '{company.id}_%'
+            """,
+        )
 
 
 @openupgrade.migrate()
@@ -542,3 +583,4 @@ def migrate(env, version):
     _account_tax_group_migration(env)
     _map_chart_template_id_to_chart_template(env, "res_company")
     _map_chart_template_id_to_chart_template(env, "account_report")
+    _rename_coa_elements_xmlids(env)

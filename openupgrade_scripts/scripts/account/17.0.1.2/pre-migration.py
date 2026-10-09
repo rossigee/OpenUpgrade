@@ -2,8 +2,6 @@
 # License AGPL-3.0 or later (https://www.gnu.org/licenses/agpl).
 from openupgradelib import openupgrade
 
-from odoo.tools.sql import convert_column_translatable
-
 _fields_renames = [
     (
         "res.company",
@@ -13,14 +11,7 @@ _fields_renames = [
     ),
 ]
 
-_l10n_generic_coa_tax_group_xmlid = [
-    "l10n_generic_coa.tax_group_15",
-]
-
-_l10n_generic_coa_tax_xmlid = [
-    "l10n_generic_coa.sale_tax_template",
-    "l10n_generic_coa.purchase_tax_template",
-]
+_l10n_generic_coa_tax_group_xmlid = "account.tax_group_15"
 
 
 def _map_account_report_filter_account_type(env):
@@ -53,7 +44,7 @@ def _generic_coa_rename_xml_id(env):
     in order to avoid duplication
     """
     _dummy, template_id = env["ir.model.data"]._xmlid_to_res_model_res_id(
-        "l10n_generic_coa.configurable_chart_template",
+        "account.configurable_chart_template",
     )
     if not template_id:
         return
@@ -65,21 +56,21 @@ def _generic_coa_rename_xml_id(env):
     )
     xmlids_renames = []
     for (company_id,) in env.cr.fetchall():
-        for tax_group_xmlid in _l10n_generic_coa_tax_group_xmlid:
-            new_xmlid = f"account.{company_id}_" + tax_group_xmlid.split(".")[1]
-            xmlids_renames.append((tax_group_xmlid, new_xmlid))
-        for tax_xmlid in _l10n_generic_coa_tax_xmlid:
-            old_xmlid = f"l10n_generic_coa.{company_id}_" + tax_xmlid.split(".")[1]
-            new_xmlid = f"account.{company_id}_" + tax_xmlid.split(".")[1]
-            xmlids_renames.append((old_xmlid, new_xmlid))
+        old_xml_id = _l10n_generic_coa_tax_group_xmlid
+        new_xmlid = (
+            f"account.{company_id}_" + _l10n_generic_coa_tax_group_xmlid.split(".")[1]
+        )
+        xmlids_renames.append((old_xml_id, new_xmlid))
     openupgrade.rename_xmlids(env.cr, xmlids_renames)
+    openupgrade.set_xml_ids_noupdate_value(
+        env, "account", [_l10n_generic_coa_tax_group_xmlid.split(".")[1]], False
+    )
 
 
 def _convert_account_tax_description(env):
     openupgrade.rename_columns(
         env.cr, {"account_tax": [("description", "invoice_label")]}
     )
-    convert_column_translatable(env.cr, "account_tax", "invoice_label", "jsonb")
 
 
 def _am_create_delivery_date_column(env):
@@ -120,6 +111,7 @@ def _am_uniquify_name(env):
         UPDATE account_move SET name=name || ' [' || id || ']'
         FROM (
             SELECT array_agg(id) ids FROM account_move
+            WHERE state = 'posted' AND name != '/'
             GROUP BY journal_id, name HAVING COUNT(id)>1
         ) duplicate_names
         WHERE account_move.id=ANY(duplicate_names.ids);
@@ -203,6 +195,26 @@ def _pre_create_early_pay_discount_computation(env):
     )
 
 
+def _pre_account_move_line_invoice_date_computation(env):
+    """Avoid triggering the computed method"""
+    openupgrade.logged_query(
+        env.cr,
+        """
+        ALTER TABLE account_move_line
+        ADD COLUMN IF NOT EXISTS invoice_date DATE;
+        """,
+    )
+    openupgrade.logged_query(
+        env.cr,
+        """
+        UPDATE account_move_line aml
+        SET invoice_date = am.invoice_date
+        FROM account_move am
+        WHERE am.invoice_date IS NOT NULL AND aml.move_id = am.id;
+        """,
+    )
+
+
 def _decouple_obsolete_tables(env):
     """
     Remove all foreign keys held by and pointed to template tables
@@ -240,15 +252,17 @@ def _pre_create_account_report_active(env):
     """
     Precreate column with default value true, then switch back to false
     """
-    env.cr.execute(
+    openupgrade.logged_query(
+        env.cr,
         """
         ALTER TABLE account_report ADD COLUMN active boolean DEFAULT true
-        """
+        """,
     )
-    env.cr.execute(
+    openupgrade.logged_query(
+        env.cr,
         """
-        ALTER TABLE account_report ALTER COLUMN active SET DEFAULT false
-        """
+        ALTER TABLE account_report ALTER COLUMN active DROP DEFAULT
+        """,
     )
 
 
@@ -270,7 +284,7 @@ def _remove_obsolete_constraints(env):
 def migrate(env, version):
     _map_account_report_filter_account_type(env)
     _generic_coa_rename_xml_id(env)
-    # Drop triagram index on name column of account.account
+    # Drop trigram index on name column of account.account
     # to avoid error when loading registry, it will be recreated
     openupgrade.logged_query(
         env.cr,
@@ -286,6 +300,7 @@ def migrate(env, version):
     _account_report_update_figure_type(env)
     _account_tax_repartition_line_merge_repartition_lines_m2o(env)
     _pre_create_early_pay_discount_computation(env)
+    _pre_account_move_line_invoice_date_computation(env)
     _decouple_obsolete_tables(env)
     _pre_create_account_report_active(env)
     _remove_obsolete_constraints(env)
